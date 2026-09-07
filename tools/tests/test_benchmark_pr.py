@@ -158,6 +158,26 @@ class BenchmarkComparisonTest(unittest.TestCase):
         self.assertEqual(bench.delta_text(0, 1, "lower"), "n/a (base=0)")
         self.assertEqual(bench.delta_text(0, 0, "lower"), "0.0%")
 
+    def test_loose_alert_boundaries_and_recall_precedence(self):
+        for candidate, expected in ((110, 0), (90, 0), (89, 1), (80, 1), (79, 2)):
+            entry = dict(direction="higher", base={"median": 100}, candidate={"median": candidate})
+            self.assertEqual(bench.alert_level(entry), expected)
+        for candidate, expected in ((0.94, 0), (0.939, 1), (0.92, 1), (0.919, 2)):
+            entry = dict(direction="recall", base={"median": 0.95}, candidate={"median": candidate})
+            self.assertEqual(bench.alert_level(entry), expected)
+        values = samples()
+        for sample in values["IVF_FLAT"]["candidate"]:
+            sample.update(recall_at_10="0.90", steady_batch_qps="200")
+        metadata = dict(base_sha="base", candidate_sha="pr", driver_sha256="driver",
+                        rustc="rust", platform="os", cpu="cpu", rounds=2)
+        report = bench.render_report(metadata, bench.summarize(values, 2))
+        visible = report.split("<details>")[0]
+        self.assertIn("🔴 Recall", visible)
+        self.assertIn("1/5 indexes need a look", visible)
+        self.assertNotIn("Runner:", visible)
+        self.assertNotIn("RSS", visible)
+        self.assertEqual(report.count("<details>"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

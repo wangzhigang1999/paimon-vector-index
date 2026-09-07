@@ -27,8 +27,12 @@ The `PR benchmark` workflow compares the exact PR base SHA with GitHub's PR merg
 commit on the same Ubuntu runner. It runs when the core, Cargo configuration, or
 benchmark tooling changes. For branches in the same repository, the result is
 posted directly on the PR as one bot comment that is updated on subsequent runs.
-The comment includes the overview and expandable measurements; no download is
-needed. A separate job with comment permission reads the report as text without
+The comment opens with a five-row Recall/single-QPS/batch-QPS table and colored
+status markers. QPS drops greater than 10%/20% or recall drops greater than
+1/3 percentage points are yellow/red; these are loose visual reminders, not CI
+gates or significance tests. All other metrics, samples, and environment details
+are inside one collapsed section. No download is needed.
+A separate job with comment permission reads the report as text without
 checking out or executing PR code. Results for an outdated PR head are ignored.
 Fork PRs with read-only tokens still publish **Checks → Compare base and PR →
 Summary**. The workflow artifact retains raw CSVs, build/sample logs, environment

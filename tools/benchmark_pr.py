@@ -191,9 +191,51 @@ def summarize(samples, rounds):
     return results
 
 
+def alert_level(entry):
+    base, candidate = entry["base"]["median"], entry["candidate"]["median"]
+    if entry["direction"] == "recall":
+        loss = round((base - candidate) * 100, 6)
+        yellow, red = 1, 3
+    else:
+        loss = round((1 - candidate / base) * 100, 6) if base else 0
+        yellow, red = 10, 20
+    return 2 if loss > red else 1 if loss > yellow else 0
+
+
 def render_report(metadata, results):
+    focus = (("recall_at_10", "Recall"), ("steady_sequential_qps", "single QPS"),
+             ("steady_batch_qps", "batch QPS"))
+    levels = {index: max(alert_level(metrics[field]) for field, _ in focus)
+              for index, metrics in results.items()}
+    flagged = sum(level > 0 for level in levels.values())
+    icon = ("🟢", "🟡", "🔴")[max(levels.values(), default=0)]
+    headline = (f"{flagged}/{len(results)} indexes need a look" if flagged
+                else f"No alerts ({len(results)}/{len(results)} indexes)")
+    lines = ["## Vector index benchmark", "", f"**{icon} {headline}**", ""]
+    if metadata.get("calibration"):
+        lines += ["A/A calibration — identical core code; deltas show measurement variation.", ""]
+    lines += ["| Index | Recall@10 (Δ) | Single QPS Δ | Batch QPS Δ | Status |",
+              "|---|---:|---:|---:|---|"]
+    for index, metrics in results.items():
+        recall = metrics["recall_at_10"]
+        reasons = [label for field, label in focus if alert_level(metrics[field])]
+        status = ("🟢 OK" if not reasons else
+                  f"{('🟢', '🟡', '🔴')[levels[index]]} {', '.join(reasons)}")
+        lines.append(
+            f"| {index} | {recall['candidate']['median'] * 100:.2f}% ({recall['delta']}) | "
+            f"{metrics['steady_sequential_qps']['delta']} | "
+            f"{metrics['steady_batch_qps']['delta']} | {status} |"
+        )
+    lines += ["", "🟡 QPS ↓ >10% or Recall ↓ >1pp · 🔴 QPS ↓ >20% or Recall ↓ >3pp. "
+              "Advisory only; QPS is measured after warmup.", "",
+              "<details><summary>All metrics, samples & environment</summary>", ""]
+    lines += render_details(metadata, results)
+    lines += ["", "</details>", ""]
+    return "\n".join(lines)
+
+
+def render_details(metadata, results):
     lines = [
-        "# PR / base benchmark", "",
         f"- Base: `{metadata['base_sha']}`",
         f"- Candidate (merge result in PR CI): `{metadata['candidate_sha']}`",
         f"- Shared benchmark driver SHA-256: `{metadata['driver_sha256']}`",
@@ -214,22 +256,8 @@ def render_report(metadata, results):
         "it is not index-only or search peak memory. First query is not a cold-disk measurement.",
         "",
     ]
-    if metadata.get("calibration"):
-        lines += ["**A/A calibration: core sources and Cargo inputs are identical. "
-                  "These timing deltas measure repeatability, not an index-code improvement.**", ""]
-    lines += ["| Index | Recall base → PR | Warm sequential QPS Δ | Warm batch QPS Δ | Warm P95 Δ | Build Δ |",
-              "|---|---:|---:|---:|---:|---:|"]
     for index, metrics in results.items():
-        recall = metrics["recall_at_10"]
-        lines.append(
-            f"| {index} | {recall['base']['median'] * 100:.2f}% → "
-            f"{recall['candidate']['median'] * 100:.2f}% | "
-            f"{metrics['steady_sequential_qps']['delta']} | {metrics['steady_batch_qps']['delta']} | "
-            f"{metrics['steady_sequential_p95_us']['delta']} | {metrics['build_ms']['delta']} |"
-        )
-    lines += [""]
-    for index, metrics in results.items():
-        lines += [f"<details><summary>{index}: measurements and sample ranges</summary>", ""]
+        lines += [f"### {index}", ""]
         recall = metrics["recall_at_10"]
         if recall["candidate"]["median"] < recall["base"]["median"]:
             lines += ["**Recall decreased. Do not interpret faster queries as a quality-preserving improvement.**", ""]
@@ -248,10 +276,10 @@ def render_report(metadata, results):
                 )
             arrow = "↑" if entry["direction"] in ("higher", "recall") else "↓"
             lines.append(f"| {entry['label']} {arrow} | {values[0]} | {values[1]} | {entry['delta']} |")
-        lines += ["", "</details>", ""]
+        lines += [""]
     lines += ["Raw CSVs, stderr logs, build logs, environment metadata and summary.json "
               "are available in the workflow artifact.", ""]
-    return "\n".join(lines)
+    return lines
 
 
 def build(checkout, output, side, env, deadline):
