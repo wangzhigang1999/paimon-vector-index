@@ -25,10 +25,14 @@ This directory contains helper scripts used by release managers and committers.
 
 The `PR benchmark` workflow compares the exact PR base SHA with GitHub's PR merge
 commit on the same Ubuntu runner. It runs when the core, Cargo configuration, or
-benchmark tooling changes. Open **Checks → Compare base and PR → Summary** for
-the comparison; the workflow artifact includes raw CSVs, build/sample logs,
-environment metadata, and machine-readable results. No PR comment or external
-service is required.
+benchmark tooling changes. For branches in the same repository, the result is
+posted directly on the PR as one bot comment that is updated on subsequent runs.
+The comment includes the overview and expandable measurements; no download is
+needed. A separate job with comment permission reads the report as text without
+checking out or executing PR code. Results for an outdated PR head are ignored.
+Fork PRs with read-only tokens still publish **Checks → Compare base and PR →
+Summary**. The workflow artifact retains raw CSVs, build/sample logs, environment
+metadata, and machine-readable results for further investigation.
 
 `benchmark_pr.py` builds both revisions in release mode with separate target
 directories, then runs four samples per version per index. Each index is tested
