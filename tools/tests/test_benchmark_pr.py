@@ -1,0 +1,107 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+import copy
+import csv
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
+
+
+SPEC = importlib.util.spec_from_file_location(
+    "benchmark_pr", Path(__file__).resolve().parents[1] / "benchmark_pr.py"
+)
+bench = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(bench)
+
+
+def row(index="IVF_FLAT"):
+    values = dict.fromkeys(bench.CASE_FIELDS, "1")
+    values.update({field: "100" for field, _, _ in bench.METRICS})
+    values.update(index=index, nq="10", recall_at_10="0.95")
+    return values
+
+
+def samples():
+    return {index: {side: [row(index), row(index)] for side in ("base", "candidate")}
+            for index in bench.INDEXES}
+
+
+class BenchmarkComparisonTest(unittest.TestCase):
+    def test_medians_units_and_recall_percentage_points(self):
+        values = samples()
+        values["IVF_FLAT"]["base"][1]["sequential_qps"] = "300"
+        values["IVF_FLAT"]["candidate"][0]["sequential_qps"] = "200"
+        values["IVF_FLAT"]["candidate"][1]["sequential_qps"] = "400"
+        for value in values["IVF_FLAT"]["candidate"]:
+            value["recall_at_10"] = "0.90"
+        result = bench.summarize(values, 2)["IVF_FLAT"]
+        self.assertEqual(result["sequential_qps"]["base"]["median"], 200)
+        self.assertEqual(result["sequential_qps"]["delta"], "+50.0%")
+        self.assertEqual(result["recall_at_10"]["delta"], "-5.00 pp")
+        self.assertEqual(result["sequential_pread_bytes"]["base"]["median"], 10)
+        metadata = dict(base_sha="base", candidate_sha="pr", driver_sha256="driver",
+                        rustc="rust", platform="os", cpu="cpu", rounds=2)
+        report = bench.render_report(metadata, bench.summarize(values, 2))
+        self.assertIn("Recall decreased", report)
+        self.assertIn("[100.00, 300.00]", report)
+
+    def test_incomplete_or_mismatched_workloads_fail(self):
+        for change in ("missing", "shape", "parameters"):
+            with self.subTest(change=change):
+                values = samples()
+                if change == "missing":
+                    values["IVF_FLAT"]["candidate"].pop()
+                else:
+                    field = "nq" if change == "shape" else "nprobe"
+                    values["IVF_FLAT"]["candidate"][0][field] = "999"
+                with self.assertRaises(ValueError):
+                    bench.summarize(values, 2)
+
+    def test_csv_rejects_missing_duplicate_and_invalid_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.csv"
+            good = row()
+            bad_values = []
+            for field, value in (("batch_qps", "nan"), ("build_ms", "-1"),
+                                 ("recall_at_10", "1.1"), ("nq", "0"),
+                                 ("batch_qps", "0"), ("index", "DISKANN")):
+                bad = copy.copy(good)
+                bad[field] = value
+                bad_values.append([bad])
+            for rows in ([], [good, good], *bad_values):
+                with self.subTest(rows=rows):
+                    with path.open("w", newline="") as file:
+                        writer = csv.DictWriter(file, fieldnames=good)
+                        writer.writeheader()
+                        writer.writerows(rows)
+                    with self.assertRaises(ValueError):
+                        bench.read_sample(path, "IVF_FLAT")
+            with path.open("w", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=good)
+                writer.writeheader()
+                writer.writerow(good)
+            self.assertEqual(bench.read_sample(path, "IVF_FLAT"), good)
+
+    def test_zero_baseline_is_not_a_false_percentage(self):
+        self.assertEqual(bench.delta_text(0, 1, "lower"), "n/a (base=0)")
+        self.assertEqual(bench.delta_text(0, 0, "lower"), "0.0%")
+
+
+if __name__ == "__main__":
+    unittest.main()

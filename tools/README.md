@@ -21,6 +21,56 @@
 
 This directory contains helper scripts used by release managers and committers.
 
+## PR / base benchmark
+
+The `PR benchmark` workflow compares the exact PR base SHA with GitHub's PR merge
+commit on the same Ubuntu runner. It runs when the core, Cargo configuration, or
+benchmark tooling changes. Open **Checks → Compare base and PR → Summary** for
+the comparison; the workflow artifact includes raw CSVs, build/sample logs,
+environment metadata, and machine-readable results. No PR comment or external
+service is required.
+
+`benchmark_pr.py` builds both revisions in release mode with separate target
+directories, then runs four samples per version per index. Each index is tested
+in a fresh process, alternating base/candidate and candidate/base pairs. Both
+versions use the candidate's `ann_bench.rs` and its support module, so a change
+to the benchmark itself cannot silently change the measurement between sides.
+An incompatible driver/API combination fails explicitly and needs a compatible
+shared driver before results can be compared.
+
+The initial workload is deliberately small: 10,000 synthetic 64D vectors, 4,096
+training vectors, 2,048 queries, top-10, seed 42, and two Rayon threads. It covers
+IVF-FLAT, IVF-SQ, IVF-PQ, IVF-RQ and DiskANN on local warm page cache. Sequential
+queries follow reader optimization and one first query; batch queries use a
+separate optimized reader. It does not measure cold storage or real object-store
+performance. Recall is currently measured for batch results. Process peak RSS
+is sampled through build and includes dataset/ground-truth allocations, not
+search peak memory.
+
+The report shows medians and min/max ranges, with relative changes for timing,
+throughput, I/O, memory, and size. Recall changes use percentage points. A recall
+drop is highlighted alongside performance. This first version is informational:
+performance/recall changes do not fail CI, but build failures, timeouts, invalid
+metrics, missing samples, and mismatched workload parameters do. With only four
+samples, a reported percentage is not a statistical significance claim.
+
+To reproduce locally, create two **disposable** checkouts, use the same Rust
+toolchain as the workflow, and run from the candidate checkout:
+
+```bash
+python3 tools/benchmark_pr.py \
+  --base /path/to/disposable-base \
+  --candidate /path/to/disposable-candidate \
+  --output /path/to/new-results-directory
+```
+
+The script overwrites the two benchmark-driver files in the base checkout. The
+output directory must not exist. `--rounds 2` provides a shorter smoke run;
+`--timeout` sets the per-process timeout in seconds (default 180). Dataset and
+index options are pinned in the script; inherited `ANN_*` settings are removed.
+CI pins Rust 1.94.1 and the x86-64 CPU target, caches dependency downloads only,
+and uploads reports even when a comparison fails.
+
 ## ANN-Benchmarks dataset conversion
 
 `convert_ann_benchmarks.py` converts a dense
