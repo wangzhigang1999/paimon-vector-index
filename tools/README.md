@@ -25,18 +25,23 @@ This directory contains helper scripts used by release managers and committers.
 
 The `PR benchmark` workflow compares the exact PR base SHA with GitHub's PR merge
 commit on the same Ubuntu runner. It runs when the core, Cargo configuration, or
-benchmark tooling changes. For branches in the same repository, the result is
-posted directly on the PR as one bot comment that is updated on subsequent runs.
-The comment opens with a five-row Recall/single-QPS/batch-QPS table and colored
-status markers. QPS drops greater than 10%/20% or recall drops greater than
-1/3 percentage points are yellow/red; these are loose visual reminders, not CI
-gates or significance tests. One collapsed table adds absolute QPS, P95, build
-time, process RSS and index size. The key results need no download.
-A separate job with comment permission reads the report as text without
-checking out or executing PR code. Results for an outdated PR head or base are ignored.
-Fork PRs with read-only tokens still publish **Checks → Compare base and PR →
-Summary**. The workflow artifact retains raw CSVs, build/sample logs, environment
-metadata, and machine-readable results for further investigation.
+benchmark tooling changes. The result is
+published in the Actions summary and posted as one updated bot comment, including
+for external fork PRs. The comment opens with a five-row Recall/QPS table and
+colored status markers. QPS drops greater than 10%/20% or recall drops greater
+than 1/3 percentage points are yellow/red; these are advisory, not CI gates.
+One collapsed table adds absolute QPS, P95, build time, process RSS and index size.
+
+A separate `workflow_run` publisher runs from the default branch with comment
+permission. It downloads only the triggering run/attempt's report artifact,
+checks the PR against GitHub's source repository, branch and revision data, and
+skips closed PRs or changed head/base revisions. It never checks out PR code,
+restores PR caches, or executes artifact contents. Raw CSVs, logs, environment
+metadata and machine-readable results remain available as workflow artifacts.
+
+The publisher must first be merged into the target repository's default branch
+before automatic comments can run. The PR introducing it still has its Actions
+summary; subsequent runs can publish comments once the publisher is installed.
 
 `benchmark_pr.py` builds both revisions in release mode with separate target
 directories, then runs six samples per version per index. Each index is tested
