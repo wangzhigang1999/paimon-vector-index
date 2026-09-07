@@ -838,6 +838,10 @@ pub(crate) fn search_batch_ivfflat_reader_filter_range<R: SeekRead>(
     }
     validate_batch_seed(seed_ids, seed_distances, nq, k)?;
 
+    if nq == 1 && probe_start == 0 && seed_ids.is_empty() {
+        return reader.search_with_filter(queries, k, probe_end, filter);
+    }
+
     let mut processed = queries[..expected_query_len].to_vec();
     if reader.metric == MetricType::Cosine {
         for qi in 0..nq {
