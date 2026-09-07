@@ -144,8 +144,9 @@ jobs:
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
-            if (pr.state !== 'open' || pr.head.sha !== context.payload.pull_request.head.sha) {
-              core.info('Skipping stale benchmark result: PR closed or head changed.');
+            if (pr.state !== 'open' || pr.head.sha !== context.payload.pull_request.head.sha
+                || pr.base.sha !== context.payload.pull_request.base.sha) {
+              core.info('Skipping stale benchmark result: PR closed or head/base changed.');
               return;
             }
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;

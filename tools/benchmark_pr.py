@@ -67,11 +67,6 @@ METRICS = (
     ("steady_sequential_qps", "Warm sequential QPS", "higher"),
     ("steady_batch_qps", "Warm batch QPS", "higher"),
     ("steady_sequential_p95_us", "Warm sequential P95 (µs)", "lower"),
-    ("first_query_us", "First query (µs)", "lower"),
-    ("sequential_pread_rounds", "First-pass read rounds / sequential query", "lower"),
-    ("sequential_pread_bytes", "First-pass read bytes / sequential query", "lower"),
-    ("batch_pread_rounds", "First-pass read rounds / batch query", "lower"),
-    ("batch_pread_bytes", "First-pass read bytes / batch query", "lower"),
     ("build_ms", "Build (ms)", "lower"),
     ("peak_rss_bytes", "Process peak RSS up to build completion (MiB)", "lower"),
     ("file_bytes", "Index size (MiB)", "lower"),
@@ -147,8 +142,6 @@ def read_sample(path, index):
 
 def metric_value(row, field):
     value = float(row[field])
-    if "pread_" in field:
-        return value / int(row["nq"])
     if field in ("peak_rss_bytes", "file_bytes"):
         return value / (1024 * 1024)
     return value
@@ -228,57 +221,33 @@ def render_report(metadata, results):
         )
     lines += ["", "🟡 QPS ↓ >10% or Recall ↓ >1pp · 🔴 QPS ↓ >20% or Recall ↓ >3pp. "
               "Advisory only; QPS is measured after warmup.", "",
-              "<details><summary>All metrics, samples & environment</summary>", ""]
+              "<details><summary>Absolute metrics & environment</summary>", ""]
     lines += render_details(metadata, results)
     lines += ["", "</details>", ""]
     return "\n".join(lines)
 
 
 def render_details(metadata, results):
+    fields = ("steady_sequential_qps", "steady_batch_qps", "steady_sequential_p95_us",
+              "build_ms", "peak_rss_bytes", "file_bytes")
     lines = [
-        f"- Base: `{metadata['base_sha']}`",
-        f"- Candidate (merge result in PR CI): `{metadata['candidate_sha']}`",
-        f"- Shared benchmark driver SHA-256: `{metadata['driver_sha256']}`",
-        f"- Rust: `{metadata['rustc'].splitlines()[0]}`",
-        f"- Runner: {metadata['platform']}; {metadata['cpu']}",
-        f"- {metadata['rounds']} fresh processes per version per index; "
-        "alternating base→candidate / candidate→base pairs; 2 Rayon threads.",
-        "- Fixed synthetic L2 workload: 10,000 × 64D, 4,096 training vectors, "
-        "2,048 queries, top-10, seed 42, nlist=64, nprobe=8, PQ m=8, DiskANN L=100.",
-        "- Local warm page cache. Each process builds its own index. First-pass Recall/I/O "
-        "are recorded before repeated timing. The complete sequential and batch passes "
-        "warm their separate readers; each timed mode then repeats full sweeps for at least 1 second.",
-        "- Values are medians [min, max]. ↑ means higher is better, ↓ means lower is better. "
-        "Delta is PR/base − 1; recall delta is in percentage points (pp).",
-        "- Timing changes are observations, not a merge gate "
-        "or a statistical significance claim. Recall is measured on batch results.",
-        "- RSS is the process lifetime peak up to build completion, including dataset/ground truth; "
-        "it is not index-only or search peak memory. First query is not a cold-disk measurement.",
-        "",
+        "Medians, base → PR. QPS/P95 are measured after warmup.", "",
+        "| Index | Single QPS | Batch QPS | P95 (µs) | Build (ms) | Process RSS (MiB) | Size (MiB) |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for index, metrics in results.items():
-        lines += [f"### {index}", ""]
-        recall = metrics["recall_at_10"]
-        if recall["candidate"]["median"] < recall["base"]["median"]:
-            lines += ["**Recall decreased. Do not interpret faster queries as a quality-preserving improvement.**", ""]
-        lines += ["| Metric | Base [min, max] | PR [min, max] | Δ PR/base |",
-                  "|---|---:|---:|---:|"]
-        for field, entry in metrics.items():
-            values = []
-            for side in ("base", "candidate"):
-                summary = entry[side]
-                scale = 100 if entry["direction"] == "recall" else 1
-                unit = "%" if scale == 100 else ""
-                precision = 4 if field.endswith("pread_rounds") else 2
-                values.append(
-                    f"{summary['median'] * scale:,.{precision}f}{unit} "
-                    f"[{summary['min'] * scale:,.{precision}f}, {summary['max'] * scale:,.{precision}f}]"
-                )
-            arrow = "↑" if entry["direction"] in ("higher", "recall") else "↓"
-            lines.append(f"| {entry['label']} {arrow} | {values[0]} | {values[1]} | {entry['delta']} |")
-        lines += [""]
-    lines += ["Raw CSVs, stderr logs, build logs, environment metadata and summary.json "
-              "are available in the workflow artifact.", ""]
+        values = [f"{metrics[field]['base']['median']:,.2f} → "
+                  f"{metrics[field]['candidate']['median']:,.2f}" for field in fields]
+        lines.append(f"| {index} | " + " | ".join(values) + " |")
+    lines += [
+        "",
+        f"Base `{metadata['base_sha']}` · PR merge `{metadata['candidate_sha']}`",
+        f"{metadata['rustc'].splitlines()[0]} · {metadata['platform']} · {metadata['cpu']}",
+        f"{metadata['rounds']} samples/version/index, alternating execution order; "
+        "2 threads; 10k × 64D vectors; 2,048 queries; ≥1s per timed mode.",
+        "RSS is the process lifetime peak up to build completion, including dataset/ground truth.",
+        "Raw CSVs, sample ranges, workload settings and logs are in the workflow artifact.",
+    ]
     return lines
 
 

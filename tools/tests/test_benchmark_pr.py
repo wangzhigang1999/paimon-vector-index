@@ -59,12 +59,12 @@ class BenchmarkComparisonTest(unittest.TestCase):
         self.assertEqual(result["steady_sequential_qps"]["base"]["median"], 200)
         self.assertEqual(result["steady_sequential_qps"]["delta"], "+50.0%")
         self.assertEqual(result["recall_at_10"]["delta"], "-5.00 pp")
-        self.assertEqual(result["sequential_pread_bytes"]["base"]["median"], 10)
+        self.assertAlmostEqual(result["file_bytes"]["base"]["median"], 100 / (1024 * 1024))
         metadata = dict(base_sha="base", candidate_sha="pr", driver_sha256="driver",
                         rustc="rust", platform="os", cpu="cpu", rounds=2, calibration=True)
         report = bench.render_report(metadata, bench.summarize(values, 2))
-        self.assertIn("Recall decreased", report)
-        self.assertIn("[100.00, 300.00]", report)
+        self.assertIn("🔴 Recall", report)
+        self.assertIn("200.00 → 300.00", report)
         self.assertIn("A/A calibration", report)
 
     def test_incomplete_or_mismatched_workloads_fail(self):
@@ -177,6 +177,7 @@ class BenchmarkComparisonTest(unittest.TestCase):
         self.assertNotIn("Runner:", visible)
         self.assertNotIn("RSS", visible)
         self.assertEqual(report.count("<details>"), 1)
+        self.assertEqual(report.count("| Index |"), 2)
 
 
 if __name__ == "__main__":

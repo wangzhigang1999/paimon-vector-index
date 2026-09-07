@@ -30,10 +30,10 @@ posted directly on the PR as one bot comment that is updated on subsequent runs.
 The comment opens with a five-row Recall/single-QPS/batch-QPS table and colored
 status markers. QPS drops greater than 10%/20% or recall drops greater than
 1/3 percentage points are yellow/red; these are loose visual reminders, not CI
-gates or significance tests. All other metrics, samples, and environment details
-are inside one collapsed section. No download is needed.
+gates or significance tests. One collapsed table adds absolute QPS, P95, build
+time, process RSS and index size. The key results need no download.
 A separate job with comment permission reads the report as text without
-checking out or executing PR code. Results for an outdated PR head are ignored.
+checking out or executing PR code. Results for an outdated PR head or base are ignored.
 Fork PRs with read-only tokens still publish **Checks → Compare base and PR →
 Summary**. The workflow artifact retains raw CSVs, build/sample logs, environment
 metadata, and machine-readable results for further investigation.
@@ -63,8 +63,8 @@ up to build completion, including dataset and ground-truth allocations, not
 index-only or search peak memory. Ground-truth IDs are copied from the retained
 top-k slice to avoid retaining an N-vector allocation per query.
 
-The report shows medians and min/max ranges, with relative changes for timing,
-throughput, I/O, memory, and size. Recall changes use percentage points. A recall
+The report shows medians, with relative QPS changes and recall changes in
+percentage points. Sample ranges are kept in the JSON artifact. A recall
 drop is highlighted alongside performance. This first version is informational:
 performance/recall changes do not fail CI, but build failures, timeouts, invalid
 metrics, missing samples, and mismatched workload parameters do. Sample ranges
