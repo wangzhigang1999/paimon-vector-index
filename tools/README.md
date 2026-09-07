@@ -35,7 +35,7 @@ Summary**. The workflow artifact retains raw CSVs, build/sample logs, environmen
 metadata, and machine-readable results for further investigation.
 
 `benchmark_pr.py` builds both revisions in release mode with separate target
-directories, then runs four samples per version per index. Each index is tested
+directories, then runs six samples per version per index. Each index is tested
 in a fresh process, alternating base/candidate and candidate/base pairs. Both
 versions use the candidate's `ann_bench.rs` and its support module, so a change
 to the benchmark itself cannot silently change the measurement between sides.
@@ -44,19 +44,31 @@ shared driver before results can be compared.
 
 The initial workload is deliberately small: 10,000 synthetic 64D vectors, 4,096
 training vectors, 2,048 queries, top-10, seed 42, and two Rayon threads. It covers
-IVF-FLAT, IVF-SQ, IVF-PQ, IVF-RQ and DiskANN on local warm page cache. Sequential
-queries follow reader optimization and one first query; batch queries use a
-separate optimized reader. It does not measure cold storage or real object-store
-performance. Recall is currently measured for batch results. Process peak RSS
-is sampled through build and includes dataset/ground-truth allocations, not
-search peak memory.
+IVF-FLAT, IVF-SQ, IVF-PQ, IVF-RQ and DiskANN on local warm page cache. First-pass
+Recall and I/O preserve the original benchmark semantics: sequential queries
+follow reader optimization and one first query; batch uses a separate optimized
+reader. After those complete passes warm each reader, the timing phase repeats
+full sequential and batch sweeps for at least one second each. The PR report's
+QPS and P95 use this warm timing phase; first-pass metrics remain in the CSV.
+Warm timing is enabled by `ANN_STEADY_MIN_MS=1000` and is local-storage only.
+Its elapsed times and query counts are included in the CSV for verification.
+
+This does not measure cold storage or real object-store performance. Recall is
+currently measured on the first batch results. RSS is the process lifetime peak
+up to build completion, including dataset and ground-truth allocations, not
+index-only or search peak memory. Ground-truth IDs are copied from the retained
+top-k slice to avoid retaining an N-vector allocation per query.
 
 The report shows medians and min/max ranges, with relative changes for timing,
 throughput, I/O, memory, and size. Recall changes use percentage points. A recall
 drop is highlighted alongside performance. This first version is informational:
 performance/recall changes do not fail CI, but build failures, timeouts, invalid
-metrics, missing samples, and mismatched workload parameters do. With only four
-samples, a reported percentage is not a statistical significance claim.
+metrics, missing samples, and mismatched workload parameters do. Sample ranges
+are not confidence intervals, and a reported percentage is not a statistical
+significance claim. When core sources and Cargo inputs are identical, the report
+explicitly labels the run as A/A repeatability calibration. Such deltas cannot
+demonstrate an index-code improvement. Repeated calibration runs are needed
+before choosing any timing gate.
 
 To reproduce locally, create two **disposable** checkouts, use the same Rust
 toolchain as the workflow, and run from the candidate checkout:
@@ -70,7 +82,12 @@ python3 tools/benchmark_pr.py \
 
 The script overwrites the two benchmark-driver files in the base checkout. The
 output directory must not exist. `--rounds 2` provides a shorter smoke run;
-`--timeout` sets the per-process timeout in seconds (default 180). Dataset and
+`--timeout` sets the per-sample timeout in seconds (default 180).
+`--total-timeout` bounds all builds and samples together (default 1,200 seconds).
+Each subprocess receives the smaller of its own timeout and the remaining total
+budget. On timeout, its process group is killed and a failure report is written.
+The 25-minute CI job reserves time beyond this 20-minute script budget for setup
+and report upload. Dataset and
 index options are pinned in the script; inherited `ANN_*` settings are removed.
 CI pins Rust 1.94.1 and the x86-64 CPU target, caches dependency downloads only,
 and uploads reports even when a comparison fails.

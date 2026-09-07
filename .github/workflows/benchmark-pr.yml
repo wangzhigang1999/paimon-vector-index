@@ -82,7 +82,8 @@ jobs:
         run: python3 -m unittest discover -s candidate/tools/tests -p 'test_benchmark_pr.py' -v
 
       - name: Build and compare both revisions
-        run: python3 candidate/tools/benchmark_pr.py --base base --candidate candidate --output results
+        # Stop the script before the job deadline, leaving time to publish failures.
+        run: python3 candidate/tools/benchmark_pr.py --base base --candidate candidate --output results --total-timeout 1200
         env:
           RUSTUP_TOOLCHAIN: 1.94.1
 

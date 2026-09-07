@@ -20,6 +20,9 @@ import csv
 import importlib.util
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
+import time
 import unittest
 
 
@@ -33,7 +36,9 @@ SPEC.loader.exec_module(bench)
 def row(index="IVF_FLAT"):
     values = dict.fromkeys(bench.CASE_FIELDS, "1")
     values.update({field: "100" for field, _, _ in bench.METRICS})
-    values.update(index=index, nq="10", recall_at_10="0.95")
+    values.update(index=index, nq="10", recall_at_10="0.95",
+                  steady_sequential_ms="100", steady_batch_ms="100",
+                  steady_sequential_queries="100", steady_batch_queries="100")
     return values
 
 
@@ -45,21 +50,22 @@ def samples():
 class BenchmarkComparisonTest(unittest.TestCase):
     def test_medians_units_and_recall_percentage_points(self):
         values = samples()
-        values["IVF_FLAT"]["base"][1]["sequential_qps"] = "300"
-        values["IVF_FLAT"]["candidate"][0]["sequential_qps"] = "200"
-        values["IVF_FLAT"]["candidate"][1]["sequential_qps"] = "400"
+        values["IVF_FLAT"]["base"][1]["steady_sequential_qps"] = "300"
+        values["IVF_FLAT"]["candidate"][0]["steady_sequential_qps"] = "200"
+        values["IVF_FLAT"]["candidate"][1]["steady_sequential_qps"] = "400"
         for value in values["IVF_FLAT"]["candidate"]:
             value["recall_at_10"] = "0.90"
         result = bench.summarize(values, 2)["IVF_FLAT"]
-        self.assertEqual(result["sequential_qps"]["base"]["median"], 200)
-        self.assertEqual(result["sequential_qps"]["delta"], "+50.0%")
+        self.assertEqual(result["steady_sequential_qps"]["base"]["median"], 200)
+        self.assertEqual(result["steady_sequential_qps"]["delta"], "+50.0%")
         self.assertEqual(result["recall_at_10"]["delta"], "-5.00 pp")
         self.assertEqual(result["sequential_pread_bytes"]["base"]["median"], 10)
         metadata = dict(base_sha="base", candidate_sha="pr", driver_sha256="driver",
-                        rustc="rust", platform="os", cpu="cpu", rounds=2)
+                        rustc="rust", platform="os", cpu="cpu", rounds=2, calibration=True)
         report = bench.render_report(metadata, bench.summarize(values, 2))
         self.assertIn("Recall decreased", report)
         self.assertIn("[100.00, 300.00]", report)
+        self.assertIn("A/A calibration", report)
 
     def test_incomplete_or_mismatched_workloads_fail(self):
         for change in ("missing", "shape", "parameters"):
@@ -78,9 +84,9 @@ class BenchmarkComparisonTest(unittest.TestCase):
             path = Path(directory) / "sample.csv"
             good = row()
             bad_values = []
-            for field, value in (("batch_qps", "nan"), ("build_ms", "-1"),
+            for field, value in (("steady_batch_qps", "nan"), ("build_ms", "-1"),
                                  ("recall_at_10", "1.1"), ("nq", "0"),
-                                 ("batch_qps", "0"), ("index", "DISKANN")):
+                                 ("steady_batch_qps", "0"), ("index", "DISKANN")):
                 bad = copy.copy(good)
                 bad[field] = value
                 bad_values.append([bad])
@@ -97,6 +103,56 @@ class BenchmarkComparisonTest(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(good)
             self.assertEqual(bench.read_sample(path, "IVF_FLAT"), good)
+
+    def test_parse_errors_identify_file_field_and_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "broken.csv"
+            for field, value in (("steady_batch_qps", None), ("steady_batch_qps", ""),
+                                 ("steady_batch_qps", "oops"), ("nq", "2.5")):
+                with self.subTest(field=field, value=value):
+                    sample = row()
+                    if value is None:
+                        del sample[field]
+                    else:
+                        sample[field] = value
+                    with path.open("w", newline="") as file:
+                        writer = csv.DictWriter(file, fieldnames=sample)
+                        writer.writeheader()
+                        writer.writerow(sample)
+                    with self.assertRaises(ValueError) as caught:
+                        bench.read_sample(path, "IVF_FLAT")
+                    self.assertIn(str(path), str(caught.exception))
+                    self.assertIn(field, str(caught.exception))
+                    if value:
+                        self.assertIn(value, str(caught.exception))
+
+    def test_total_budget_stops_before_start_and_limits_running_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "must-not-exist"
+            with self.assertRaisesRegex(TimeoutError, "total time budget"):
+                bench.run_checked([sys.executable, "-c",
+                                   "from pathlib import Path; Path(__import__('sys').argv[1]).touch()",
+                                   str(marker)], deadline=time.monotonic() - 1, timeout=10)
+            self.assertFalse(marker.exists())
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "remaining total budget"):
+            bench.run_checked([sys.executable, "-c", "import time; time.sleep(10)"],
+                              deadline=started + 0.1, timeout=10,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_short_or_partial_steady_measurements_fail(self):
+        for field, value in (("steady_batch_ms", "0"), ("steady_sequential_queries", "11")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                sample = row()
+                sample[field] = value
+                path = Path(directory) / "incomplete.csv"
+                with path.open("w", newline="") as file:
+                    writer = csv.DictWriter(file, fieldnames=sample)
+                    writer.writeheader()
+                    writer.writerow(sample)
+                with self.assertRaisesRegex(ValueError, "incomplete steady_"):
+                    bench.read_sample(path, "IVF_FLAT")
 
     def test_zero_baseline_is_not_a_false_percentage(self):
         self.assertEqual(bench.delta_text(0, 1, "lower"), "n/a (base=0)")

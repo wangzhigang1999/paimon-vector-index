@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
 import statistics
 import subprocess
 import time
@@ -53,31 +54,67 @@ WORKLOAD = {
     "ANN_DISKANN_RAW_VECTOR_ENCODING": "f32",
     "ANN_STORAGE_CASES": "local_ssd_warm_cache",
     "RAYON_NUM_THREADS": "2",
+    "ANN_STEADY_MIN_MS": "1000",
 }
 # These identify the workload, not measured results. Never compare unlike cases.
 CASE_FIELDS = (
     "dataset", "index", "storage", "n", "train_n", "nq", "d", "k", "nlist",
     "nprobe", "pq_m", "rq_bits", "diskann_build_distance",
-    "diskann_raw_vector_encoding", "l_search",
+    "diskann_raw_vector_encoding", "l_search", "steady_min_ms",
 )
 METRICS = (
     ("recall_at_10", "Batch Recall@10", "recall"),
-    ("sequential_qps", "Sequential QPS", "higher"),
-    ("batch_qps", "Batch QPS", "higher"),
-    ("p95_query_us", "Sequential P95 (µs)", "lower"),
+    ("steady_sequential_qps", "Warm sequential QPS", "higher"),
+    ("steady_batch_qps", "Warm batch QPS", "higher"),
+    ("steady_sequential_p95_us", "Warm sequential P95 (µs)", "lower"),
     ("first_query_us", "First query (µs)", "lower"),
-    ("sequential_pread_rounds", "Read rounds / sequential query", "lower"),
-    ("sequential_pread_bytes", "Read bytes / sequential query", "lower"),
-    ("batch_pread_rounds", "Read rounds / batch query", "lower"),
-    ("batch_pread_bytes", "Read bytes / batch query", "lower"),
+    ("sequential_pread_rounds", "First-pass read rounds / sequential query", "lower"),
+    ("sequential_pread_bytes", "First-pass read bytes / sequential query", "lower"),
+    ("batch_pread_rounds", "First-pass read rounds / batch query", "lower"),
+    ("batch_pread_bytes", "First-pass read bytes / batch query", "lower"),
     ("build_ms", "Build (ms)", "lower"),
-    ("peak_rss_bytes", "Process peak RSS through build (MiB)", "lower"),
+    ("peak_rss_bytes", "Process peak RSS up to build completion (MiB)", "lower"),
     ("file_bytes", "Index size (MiB)", "lower"),
 )
 
 
 def command_output(command, cwd=None):
-    return subprocess.check_output(command, cwd=cwd, text=True).strip()
+    return subprocess.check_output(command, cwd=cwd, text=True, timeout=30).strip()
+
+
+def run_checked(command, *, deadline, timeout, **kwargs):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Benchmark total time budget exhausted; stopping before next process")
+    limit = min(timeout, remaining)
+    process = subprocess.Popen(command, start_new_session=os.name == "posix", **kwargs)
+    try:
+        returncode = process.wait(timeout=limit)
+    except subprocess.TimeoutExpired as error:
+        # Cargo can leave rustc children alive if only the parent is killed.
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        process.wait()
+        raise TimeoutError(
+            f"{command[0]} exceeded {limit:.1f}s process/remaining total budget"
+        ) from error
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
+def numeric_field(row, field, path, *, integer=False):
+    raw = row.get(field)
+    if raw is None or not raw.strip():
+        raise ValueError(f"{path}: missing or empty metric/parameter {field}")
+    try:
+        value = int(raw) if integer else float(raw)
+    except (ValueError, OverflowError) as error:
+        raise ValueError(f"{path}: invalid {field}={raw!r}; expected a number") from error
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{path}: invalid {field}={raw!r}; expected finite nonnegative value")
+    return value
 
 
 def read_sample(path, index):
@@ -88,16 +125,23 @@ def read_sample(path, index):
     row = rows[0]
     if row.get("index") != index:
         raise ValueError(f"{path}: expected index {index}")
-    if any(not row.get(field) for field in CASE_FIELDS):
-        raise ValueError(f"{path}: missing workload fields")
+    for field in CASE_FIELDS:
+        if not row.get(field):
+            raise ValueError(f"{path}: missing workload field {field}")
     for field, _, _ in METRICS:
-        value = float(row[field])
-        if not math.isfinite(value) or value < 0:
-            raise ValueError(f"{path}: invalid {field}: {value}")
-    if not 0 <= float(row["recall_at_10"]) <= 1 or int(row["nq"]) <= 0:
+        numeric_field(row, field, path)
+    if not 0 <= float(row["recall_at_10"]) <= 1 or numeric_field(row, "nq", path, integer=True) <= 0:
         raise ValueError(f"{path}: invalid recall or query count")
-    if float(row["sequential_qps"]) <= 0 or float(row["batch_qps"]) <= 0:
+    if float(row["steady_sequential_qps"]) <= 0 or float(row["steady_batch_qps"]) <= 0:
         raise ValueError(f"{path}: throughput must be positive")
+    minimum = numeric_field(row, "steady_min_ms", path, integer=True)
+    if minimum <= 0:
+        raise ValueError(f"{path}: steady_min_ms must be positive")
+    for mode in ("sequential", "batch"):
+        elapsed = numeric_field(row, f"steady_{mode}_ms", path)
+        queries = numeric_field(row, f"steady_{mode}_queries", path, integer=True)
+        if elapsed < minimum or queries < int(row["nq"]) or queries % int(row["nq"]):
+            raise ValueError(f"{path}: incomplete steady_{mode} measurement")
     return row
 
 
@@ -159,25 +203,29 @@ def render_report(metadata, results):
         "alternating base→candidate / candidate→base pairs; 2 Rayon threads.",
         "- Fixed synthetic L2 workload: 10,000 × 64D, 4,096 training vectors, "
         "2,048 queries, top-10, seed 42, nlist=64, nprobe=8, PQ m=8, DiskANN L=100.",
-        "- Local warm page cache. Each process builds its own index. Reader optimization "
-        "and one first query precede sequential queries; batch uses a separate optimized reader.",
+        "- Local warm page cache. Each process builds its own index. First-pass Recall/I/O "
+        "are recorded before repeated timing. The complete sequential and batch passes "
+        "warm their separate readers; each timed mode then repeats full sweeps for at least 1 second.",
         "- Values are medians [min, max]. ↑ means higher is better, ↓ means lower is better. "
         "Delta is PR/base − 1; recall delta is in percentage points (pp).",
         "- Timing changes are observations, not a merge gate "
         "or a statistical significance claim. Recall is measured on batch results.",
-        "- Peak RSS includes dataset/ground truth and is sampled after build; "
-        "it is not search peak memory. First query is not a cold-disk measurement.",
+        "- RSS is the process lifetime peak up to build completion, including dataset/ground truth; "
+        "it is not index-only or search peak memory. First query is not a cold-disk measurement.",
         "",
     ]
-    lines += ["| Index | Recall base → PR | Sequential QPS Δ | Batch QPS Δ | P95 Δ | Build Δ |",
+    if metadata.get("calibration"):
+        lines += ["**A/A calibration: core sources and Cargo inputs are identical. "
+                  "These timing deltas measure repeatability, not an index-code improvement.**", ""]
+    lines += ["| Index | Recall base → PR | Warm sequential QPS Δ | Warm batch QPS Δ | Warm P95 Δ | Build Δ |",
               "|---|---:|---:|---:|---:|---:|"]
     for index, metrics in results.items():
         recall = metrics["recall_at_10"]
         lines.append(
             f"| {index} | {recall['base']['median'] * 100:.2f}% → "
             f"{recall['candidate']['median'] * 100:.2f}% | "
-            f"{metrics['sequential_qps']['delta']} | {metrics['batch_qps']['delta']} | "
-            f"{metrics['p95_query_us']['delta']} | {metrics['build_ms']['delta']} |"
+            f"{metrics['steady_sequential_qps']['delta']} | {metrics['steady_batch_qps']['delta']} | "
+            f"{metrics['steady_sequential_p95_us']['delta']} | {metrics['build_ms']['delta']} |"
         )
     lines += [""]
     for index, metrics in results.items():
@@ -206,7 +254,7 @@ def render_report(metadata, results):
     return "\n".join(lines)
 
 
-def build(checkout, output, side, env):
+def build(checkout, output, side, env, deadline):
     # Separate target directories prevent artifacts from one revision leaking into the other.
     command = ["cargo", "bench", "--locked", "-p", "paimon-vindex-core", "--bench",
                "ann_bench", "--no-run", "--message-format=json", "--target-dir",
@@ -214,8 +262,8 @@ def build(checkout, output, side, env):
     print(f"Building {side}", flush=True)
     messages_path = output / f"build-{side}.jsonl"
     with messages_path.open("w") as messages, (output / f"build-{side}.log").open("w") as log:
-        subprocess.run(command, cwd=checkout, env=env, stdout=messages, stderr=log,
-                       check=True, timeout=900)
+        run_checked(command, cwd=checkout, env=env, stdout=messages, stderr=log,
+                    deadline=deadline, timeout=900)
     executables = []
     for line in messages_path.read_text().splitlines():
         message = json.loads(line)
@@ -228,7 +276,18 @@ def build(checkout, output, side, env):
     return executables[0]
 
 
+def library_fingerprint(checkout):
+    paths = list((checkout / "core/src").rglob("*"))
+    paths += [checkout / name for name in ("Cargo.toml", "Cargo.lock", "core/Cargo.toml", "core/build.rs")]
+    paths += list((checkout / ".cargo").rglob("*"))
+    digest = hashlib.sha256()
+    for path in sorted(path for path in paths if path.is_file()):
+        digest.update(str(path.relative_to(checkout)).encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()
+
+
 def run(args):
+    deadline = time.monotonic() + args.total_timeout
     output = args.output.resolve()
     base, candidate = args.base.resolve(), args.candidate.resolve()
     if base == candidate:
@@ -244,8 +303,12 @@ def run(args):
         "rounds": args.rounds, "workload": WORKLOAD,
         "candidate_dirty": bool(command_output(["git", "status", "--porcelain"], candidate)),
         "execution_order": [],
+        "total_timeout_seconds": args.total_timeout,
+        "base_library_sha256": library_fingerprint(base),
+        "candidate_library_sha256": library_fingerprint(candidate),
         "rustflags": "-C target-cpu=x86-64" if platform.machine() == "x86_64" else "",
     }
+    metadata["calibration"] = metadata["base_library_sha256"] == metadata["candidate_library_sha256"]
     if shutil.which("lscpu"):
         metadata["cpu"] = next((line.split(":", 1)[1].strip()
                                 for line in command_output(["lscpu"]).splitlines()
@@ -265,7 +328,7 @@ def run(args):
            and key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS")}
     env.update(WORKLOAD)
     env.update({"RUSTFLAGS": metadata["rustflags"], "LC_ALL": "C", "CARGO_INCREMENTAL": "0"})
-    executables = {side: build(checkout, output, side, env)
+    executables = {side: build(checkout, output, side, env, deadline)
                    for side, checkout in (("base", base), ("candidate", candidate))}
     samples = {index: {"base": [], "candidate": []} for index in INDEXES}
     raw = output / "raw"
@@ -279,8 +342,8 @@ def run(args):
                 sample_env = dict(env, ANN_INDEXES=index, ANN_OUTPUT_DIR=str(output / "indexes"))
                 started = time.monotonic()
                 with prefix.with_suffix(".csv").open("w") as csv_file, prefix.with_suffix(".log").open("w") as log:
-                    subprocess.run([executables[side]], env=sample_env, cwd=output,
-                                   stdout=csv_file, stderr=log, timeout=args.timeout, check=True)
+                    run_checked([executables[side]], env=sample_env, cwd=output,
+                                stdout=csv_file, stderr=log, timeout=args.timeout, deadline=deadline)
                 samples[index][side].append(read_sample(prefix.with_suffix(".csv"), index))
                 metadata["execution_order"].append({
                     "index": index, "round": repetition + 1, "side": side,
@@ -298,11 +361,12 @@ def main():
     parser.add_argument("--base", type=Path, required=True, help="Disposable base checkout (driver is overwritten)")
     parser.add_argument("--candidate", type=Path, required=True, help="Candidate checkout providing the shared driver")
     parser.add_argument("--output", type=Path, required=True, help="New output directory")
-    parser.add_argument("--rounds", type=int, default=4, help="Samples per version/index; even number >= 2")
+    parser.add_argument("--rounds", type=int, default=6, help="Samples per version/index; even number >= 2")
     parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds per sample")
+    parser.add_argument("--total-timeout", type=int, default=1200, help="Total build/sample budget in seconds")
     args = parser.parse_args()
-    if args.rounds < 2 or args.rounds % 2 or args.timeout <= 0:
-        parser.error("rounds must be even and >= 2; timeout must be positive")
+    if args.rounds < 2 or args.rounds % 2 or args.timeout <= 0 or args.total_timeout <= 0:
+        parser.error("rounds must be even and >= 2; timeouts must be positive")
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     try:
