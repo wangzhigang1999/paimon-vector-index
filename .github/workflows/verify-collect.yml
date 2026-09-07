@@ -1,0 +1,27 @@
+name: Verify Rust collect allocation
+on: workflow_dispatch
+permissions: {}
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Compile and run allocation check
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustc +stable --version
+          cat > collect.rs <<'RS'
+          fn main() {
+              let mut distances: Vec<(f32, i64)> = (0..10000).map(|i| (i as f32, i)).collect();
+              distances.truncate(10);
+              let borrowed: Vec<i64> = distances.iter().map(|&(_, row)| row).collect();
+              let consumed: Vec<i64> = distances.into_iter().map(|(_, row)| row).collect();
+              assert_eq!(borrowed, consumed);
+              println!("borrowed: len={}, capacity={}, allocated_bytes={}", borrowed.len(), borrowed.capacity(), borrowed.capacity() * std::mem::size_of::<i64>());
+              println!("consumed: len={}, capacity={}, allocated_bytes={}", consumed.len(), consumed.capacity(), consumed.capacity() * std::mem::size_of::<i64>());
+          }
+          RS
+          rustc +stable -O collect.rs -o collect-check
+          ./collect-check | tee result.txt
+          cat result.txt >> "$GITHUB_STEP_SUMMARY"
