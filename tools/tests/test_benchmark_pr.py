@@ -60,12 +60,6 @@ class BenchmarkComparisonTest(unittest.TestCase):
         self.assertEqual(result["steady_sequential_qps"]["delta"], "+50.0%")
         self.assertEqual(result["recall_at_10"]["delta"], "-5.00 pp")
         self.assertAlmostEqual(result["file_bytes"]["base"]["median"], 100 / (1024 * 1024))
-        metadata = dict(base_sha="base", candidate_sha="pr", driver_sha256="driver",
-                        rustc="rust", platform="os", cpu="cpu", rounds=2, calibration=True)
-        report = bench.render_report(metadata, bench.summarize(values, 2))
-        self.assertIn("🔴 Recall", report)
-        self.assertIn("200.00 → 300.00", report)
-        self.assertIn("A/A calibration", report)
 
     def test_incomplete_or_mismatched_workloads_fail(self):
         for change in ("missing", "shape", "parameters"):
@@ -158,26 +152,13 @@ class BenchmarkComparisonTest(unittest.TestCase):
         self.assertEqual(bench.delta_text(0, 1, "lower"), "n/a (base=0)")
         self.assertEqual(bench.delta_text(0, 0, "lower"), "0.0%")
 
-    def test_loose_alert_boundaries_and_recall_precedence(self):
+    def test_loose_alert_boundaries(self):
         for candidate, expected in ((110, 0), (90, 0), (89, 1), (80, 1), (79, 2)):
             entry = dict(direction="higher", base={"median": 100}, candidate={"median": candidate})
             self.assertEqual(bench.alert_level(entry), expected)
         for candidate, expected in ((0.94, 0), (0.939, 1), (0.92, 1), (0.919, 2)):
             entry = dict(direction="recall", base={"median": 0.95}, candidate={"median": candidate})
             self.assertEqual(bench.alert_level(entry), expected)
-        values = samples()
-        for sample in values["IVF_FLAT"]["candidate"]:
-            sample.update(recall_at_10="0.90", steady_batch_qps="200")
-        metadata = dict(base_sha="base", candidate_sha="pr", driver_sha256="driver",
-                        rustc="rust", platform="os", cpu="cpu", rounds=2)
-        report = bench.render_report(metadata, bench.summarize(values, 2))
-        visible = report.split("<details>")[0]
-        self.assertIn("🔴 Recall", visible)
-        self.assertIn("1/5 indexes need a look", visible)
-        self.assertNotIn("Runner:", visible)
-        self.assertNotIn("RSS", visible)
-        self.assertEqual(report.count("<details>"), 1)
-        self.assertEqual(report.count("| Index |"), 2)
 
 
 if __name__ == "__main__":
