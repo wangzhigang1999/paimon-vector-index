@@ -99,7 +99,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr-${{ github.event.pull_request.number }}-benchmark-${{ github.run_attempt }}
+          name: pr-${{ github.event.pull_request.number }}-benchmark
+          overwrite: true
           path: |
             results/summary.md
             results/summary.json
@@ -128,7 +129,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: pr-${{ github.event.pull_request.number }}-benchmark-${{ github.run_attempt }}
+          name: pr-${{ github.event.pull_request.number }}-benchmark
           path: report
 
       - name: Create or update one PR comment
