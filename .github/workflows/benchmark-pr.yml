@@ -61,12 +61,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Set up fixed Rust toolchain
+      - name: Set up stable Rust toolchain
         run: |
-          rustup toolchain install 1.94.1 --profile minimal
-          rustup default 1.94.1
+          rustup toolchain install stable --profile minimal
+          rustup default stable
         env:
-          RUSTUP_TOOLCHAIN: 1.94.1
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Cache Rust downloads
         uses: actions/cache@v4
@@ -74,9 +74,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: benchmark-${{ runner.os }}-rust-1.94.1-${{ hashFiles('candidate/Cargo.lock', 'base/Cargo.lock') }}
+          key: benchmark-${{ runner.os }}-rust-stable-${{ hashFiles('candidate/Cargo.lock', 'base/Cargo.lock') }}
           restore-keys: |
-            benchmark-${{ runner.os }}-rust-1.94.1-
+            benchmark-${{ runner.os }}-rust-stable-
 
       - name: Test comparison and failure handling
         run: python3 -m unittest discover -s candidate/tools/tests -p 'test_benchmark_pr.py' -v
@@ -85,7 +85,7 @@ jobs:
         # Stop the script before the job deadline, leaving time to publish failures.
         run: python3 candidate/tools/benchmark_pr.py --base base --candidate candidate --output results --total-timeout 1200
         env:
-          RUSTUP_TOOLCHAIN: 1.94.1
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Publish comparison summary
         if: always()

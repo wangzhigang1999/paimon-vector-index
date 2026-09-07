@@ -93,8 +93,9 @@ budget. On timeout, its process group is killed and a failure report is written.
 The 25-minute CI job reserves time beyond this 20-minute script budget for setup
 and report upload. Dataset and
 index options are pinned in the script; inherited `ANN_*` settings are removed.
-CI pins Rust 1.94.1 and the x86-64 CPU target, caches dependency downloads only,
-and uploads reports even when a comparison fails.
+CI uses the same Rust stable toolchain for both revisions and records the actual
+compiler version in the report. It pins the x86-64 CPU target, caches dependency
+downloads only, and uploads reports even when a comparison fails.
 
 ## ANN-Benchmarks dataset conversion
 
