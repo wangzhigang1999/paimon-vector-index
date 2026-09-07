@@ -1017,7 +1017,10 @@ fn run_query_case(
             for query in dataset.queries.chunks_exact(config.d) {
                 let query_started = Instant::now();
                 std::hint::black_box(reader.search(query, search)?);
-                steady_latencies.push(query_started.elapsed());
+                // Keep one complete warm sweep for P95; bound storage to nq samples.
+                if steady_sequential_queries == 0 {
+                    steady_latencies.push(query_started.elapsed());
+                }
             }
             steady_sequential_queries += config.nq;
         }
@@ -1139,8 +1142,8 @@ fn exact_ground_truth(dataset: &Dataset, k: usize) -> Vec<Vec<i64>> {
                         .then_with(|| left.1.cmp(&right.1))
                 });
             }
-            // Borrow the retained top-k slice: consuming the Vec can reuse its
-            // original N-vector allocation for every ground-truth row.
+            // Borrow to collect a fresh top-k Vec. Consuming the iterator can
+            // reuse the much larger N-vector allocation via in-place collect.
             distances.iter().map(|&(_, row)| row).collect()
         })
         .collect()

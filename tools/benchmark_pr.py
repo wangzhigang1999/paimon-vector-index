@@ -184,7 +184,10 @@ def summarize(samples, rounds):
     return results
 
 
-def alert_level(entry):
+def query_alert_level(entry):
+    """Advisory levels for recall and QPS only; other metrics have no thresholds."""
+    if entry["direction"] not in ("recall", "higher"):
+        raise ValueError("Query alerts only support recall and QPS")
     base, candidate = entry["base"]["median"], entry["candidate"]["median"]
     if entry["direction"] == "recall":
         loss = round((base - candidate) * 100, 6)
@@ -198,7 +201,7 @@ def alert_level(entry):
 def render_report(metadata, results):
     focus = (("recall_at_10", "Recall"), ("steady_sequential_qps", "single QPS"),
              ("steady_batch_qps", "batch QPS"))
-    levels = {index: max(alert_level(metrics[field]) for field, _ in focus)
+    levels = {index: max(query_alert_level(metrics[field]) for field, _ in focus)
               for index, metrics in results.items()}
     flagged = sum(level > 0 for level in levels.values())
     icon = ("🟢", "🟡", "🔴")[max(levels.values(), default=0)]
@@ -211,7 +214,7 @@ def render_report(metadata, results):
               "|---|---:|---:|---:|---|"]
     for index, metrics in results.items():
         recall = metrics["recall_at_10"]
-        reasons = [label for field, label in focus if alert_level(metrics[field])]
+        reasons = [label for field, label in focus if query_alert_level(metrics[field])]
         status = ("🟢 OK" if not reasons else
                   f"{('🟢', '🟡', '🔴')[levels[index]]} {', '.join(reasons)}")
         lines.append(
@@ -231,7 +234,7 @@ def render_details(metadata, results):
     fields = ("steady_sequential_qps", "steady_batch_qps", "steady_sequential_p95_us",
               "build_ms", "peak_rss_bytes", "file_bytes")
     lines = [
-        "Medians, base → PR. QPS/P95 are measured after warmup.", "",
+        "Medians, base → PR. QPS is timed after warmup; P95 uses the first warm sweep.", "",
         "| Index | Single QPS | Batch QPS | P95 (µs) | Build (ms) | Process RSS (MiB) | Size (MiB) |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]

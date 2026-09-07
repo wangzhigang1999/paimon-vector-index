@@ -155,10 +155,13 @@ class BenchmarkComparisonTest(unittest.TestCase):
     def test_loose_alert_boundaries(self):
         for candidate, expected in ((110, 0), (90, 0), (89, 1), (80, 1), (79, 2)):
             entry = dict(direction="higher", base={"median": 100}, candidate={"median": candidate})
-            self.assertEqual(bench.alert_level(entry), expected)
+            self.assertEqual(bench.query_alert_level(entry), expected)
         for candidate, expected in ((0.94, 0), (0.939, 1), (0.92, 1), (0.919, 2)):
             entry = dict(direction="recall", base={"median": 0.95}, candidate={"median": candidate})
-            self.assertEqual(bench.alert_level(entry), expected)
+            self.assertEqual(bench.query_alert_level(entry), expected)
+
+        with self.assertRaises(ValueError):
+            bench.query_alert_level(dict(direction="lower", base={"median": 100}, candidate={"median": 120}))
 
 
 if __name__ == "__main__":

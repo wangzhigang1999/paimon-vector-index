@@ -58,7 +58,9 @@ Recall and I/O preserve the original benchmark semantics: sequential queries
 follow reader optimization and one first query; batch uses a separate optimized
 reader. After those complete passes warm each reader, the timing phase repeats
 full sequential and batch sweeps for at least one second each. The PR report's
-QPS and P95 use this warm timing phase; first-pass metrics remain in the CSV.
+QPS uses the full warm timing phase. P95 uses only its first complete sequential
+sweep, bounding latency storage to one sample per query. First-pass metrics
+remain in the CSV.
 Warm timing is enabled by `ANN_STEADY_MIN_MS=1000` and is local-storage only.
 Its elapsed times and query counts are included in the CSV for verification.
 
