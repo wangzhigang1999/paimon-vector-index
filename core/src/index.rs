@@ -1718,6 +1718,14 @@ impl<R: SeekRead> VectorIndexReader<R> {
     ) -> io::Result<(Vec<i64>, Vec<f32>)> {
         validate_query(query, self.dimension())?;
         params.validate()?;
+        // Reuse the incremental probe-range scan so automatic expansion does not
+        // reread lists visited by earlier rounds. IVF-PQ retains its existing
+        // short-result behavior; fixed-width and DiskANN searches are unchanged.
+        if params.search_width == SearchWidth::Auto
+            && matches!(self, Self::IvfFlat(_) | Self::IvfSq(_) | Self::IvfRq(_))
+        {
+            return self.search_batch_with_roaring_filter(query, 1, params, roaring_filter_bytes);
+        }
         let matching_count = if params.search_width == SearchWidth::Auto {
             Some(decode_roaring_filter_cardinality(roaring_filter_bytes)?)
         } else {
@@ -3370,6 +3378,91 @@ mod tests {
             .with_ivfpq_batch_table_reuse_max_bytes(0)
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn automatic_filtered_single_search_reads_each_list_once() {
+        struct RangeReader {
+            inner: Cursor<Vec<u8>>,
+            offsets: Arc<Mutex<Vec<u64>>>,
+        }
+        impl SeekRead for RangeReader {
+            fn pread(&mut self, ranges: &mut [ReadRequest<'_>]) -> io::Result<()> {
+                self.offsets
+                    .lock()
+                    .unwrap()
+                    .extend(ranges.iter().map(|range| range.pos));
+                self.inner.pread(ranges)
+            }
+        }
+
+        for index_type in ["ivf_flat", "ivf_sq", "ivf_rq"] {
+            let config = VectorIndexConfig::from_options(&HashMap::from([
+                ("index.type".into(), index_type.into()),
+                ("dimension".into(), "64".into()),
+                ("nlist".into(), "64".into()),
+                ("metric".into(), "l2".into()),
+            ]))
+            .unwrap();
+            let data = generate_clustered_data(512, 64, 64)
+                .into_iter()
+                .map(|value| value * 0.001)
+                .collect::<Vec<_>>();
+            let mut writer = build_writer(config, &data, 512);
+            writer
+                .add_vectors(&(0..512).collect::<Vec<i64>>(), &data, 512)
+                .unwrap();
+            let mut bytes = Vec::new();
+            writer.write(&mut PosWriter::new(&mut bytes)).unwrap();
+            let mut reader = VectorIndexReader::open(Cursor::new(bytes.clone())).unwrap();
+            reader.optimize_for_search().unwrap();
+            let mut filter = RoaringTreemap::new();
+            // Keep one early candidate and distant matches, forcing retries to
+            // retain the seed while scanning only the newly selected lists.
+            filter.insert(0);
+            filter.extend((0..512).filter(|id| id % 64 >= 32));
+            let mut filter_bytes = Vec::new();
+            filter.serialize_into(&mut filter_bytes).unwrap();
+            let query = &data[..64];
+            let initial = reader
+                .search_with_roaring_filter(query, VectorSearchParams::new(10, 16), &filter_bytes)
+                .unwrap();
+            assert!(initial.1.iter().filter(|&&d| d != f32::MAX).count() < 10);
+            let expected = reader
+                .search_with_roaring_filter(query, VectorSearchParams::new(10, 64), &filter_bytes)
+                .unwrap();
+
+            let offsets = Arc::new(Mutex::new(Vec::new()));
+            // Disable SQ's resident list cache so it cannot hide repeated scans.
+            let mut reader = VectorIndexReader::open_with_options(
+                RangeReader {
+                    inner: Cursor::new(bytes),
+                    offsets: offsets.clone(),
+                },
+                VectorIndexReaderOptions::new(0),
+            )
+            .unwrap();
+            reader.optimize_for_search().unwrap();
+            offsets.lock().unwrap().clear();
+            let actual = reader
+                .search_with_roaring_filter(query, VectorSearchParams::automatic(10), &filter_bytes)
+                .unwrap();
+            assert_eq!(actual.0, expected.0, "{index_type}");
+            assert!(actual.1.iter().all(|&distance| distance != f32::MAX));
+            for (actual, expected) in actual.1.iter().zip(&expected.1) {
+                assert!((actual - expected).abs() <= 1e-4 * expected.abs().max(1.0));
+            }
+            let observed = offsets.lock().unwrap();
+            assert!(!observed.is_empty(), "{index_type}");
+            assert_eq!(
+                observed
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                observed.len(),
+                "{index_type} must not reread a list during expansion"
+            );
+        }
     }
 
     #[test]

@@ -622,17 +622,32 @@ impl<R: SeekRead> IVFSQIndexReader<R> {
         nprobe: usize,
         filter: Option<&dyn RowIdFilter>,
     ) -> io::Result<(Vec<i64>, Vec<f32>)> {
+        self.search_with_filter_range(query, k, 0..nprobe, &[], &[], filter)
+    }
+
+    fn search_with_filter_range(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        probes: std::ops::Range<usize>,
+        seed_ids: &[i64],
+        seed_distances: &[f32],
+        filter: Option<&dyn RowIdFilter>,
+    ) -> io::Result<(Vec<i64>, Vec<f32>)> {
         self.ensure_loaded()?;
-        validate_search_inputs(query, 1, self.d, k, nprobe)?;
+        validate_search_inputs(query, 1, self.d, k, probes.end)?;
+        validate_batch_seed(seed_ids, seed_distances, 1, k)?;
         let query = preprocess_vectors(query, 1, self.d, self.metric);
         let (probe_indices, _) = kmeans::find_topk(
             &query,
             &self.quantizer_centroids,
             self.nlist,
             self.d,
-            nprobe,
+            probes.end,
         );
+        let probe_indices = &probe_indices[probes.start.min(probe_indices.len())..];
         let mut heap = TopKHeap::new(k);
+        seed_heaps(std::slice::from_mut(&mut heap), seed_ids, seed_distances, k);
         let d = self.d;
         let metric = self.metric;
         let mut batch_start = 0usize;
@@ -776,8 +791,16 @@ pub(crate) fn search_batch_ivfsq_reader_filter_range<R: SeekRead>(
         ));
     }
     validate_batch_seed(seed_ids, seed_distances, nq, k)?;
-    if nq == 1 && probe_start == 0 && seed_ids.is_empty() {
-        return reader.search_with_filter(queries, k, probe_end, filter);
+    if nq == 1 {
+        // Retain the single-query parallel list scan during incremental retries.
+        return reader.search_with_filter_range(
+            queries,
+            k,
+            probe_start..probe_end,
+            seed_ids,
+            seed_distances,
+            filter,
+        );
     }
     let processed = preprocess_vectors(queries, nq, reader.d, reader.metric);
     let (all_probe_indices, _) = kmeans::find_topk_batch(
